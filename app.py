@@ -148,7 +148,7 @@ def _fetch_one(station, parameter, years_to_fetch):
     return records
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_origin_data(origin_name: str, parameter: str) -> pd.DataFrame:
     cfg             = ORIGINS[origin_name]
     station_region  = cfg["stations"]
@@ -334,6 +334,73 @@ def process_brazil(raw_prcp: pd.DataFrame, today: pd.Timestamp):
     )
 
     return real_daily, normals_daily, crop_years_sorted, crop_year_colors, latest_crop_year
+
+
+@st.cache_data(show_spinner=False)
+def process_brazil_temp(raw_temp: pd.DataFrame, today: pd.Timestamp):
+    """Temperature for Brazil crop year (Sep-Aug)."""
+    df = raw_temp[raw_temp["date"] != "02-29"].copy().reset_index(drop=True)
+    df_real    = df[df["year"] != "normals"].copy()
+    df_normals = df[df["year"] == "normals"].copy()
+
+    df_real["year_int"]  = df_real["year"].astype(int)
+    df_real["full_date"] = pd.to_datetime(
+        df_real["year_int"].astype(str) + "-" + df_real["date"], errors="coerce"
+    )
+    df_real = df_real[df_real["full_date"].notna()].copy()
+
+    def _crop_label(dt):
+        if dt.month >= 9:
+            return f"{dt.year % 100:02d}/{(dt.year + 1) % 100:02d}"
+        return f"{(dt.year - 1) % 100:02d}/{dt.year % 100:02d}"
+
+    df_real["crop_year"] = df_real["full_date"].apply(_crop_label)
+    df_real["xdate"] = df_real["full_date"].apply(
+        lambda dt: pd.Timestamp(2000 if dt.month >= 9 else 2001, dt.month, dt.day)
+    )
+    df_real["tag"] = df_real["full_date"].apply(
+        lambda d: "realized" if d <= today else "forecast"
+    )
+
+    real_daily = (
+        df_real.groupby(["region", "crop_year", "xdate", "tag"], as_index=False)
+        .agg(tavg_avg=("tavg", "mean"))
+        .sort_values("xdate")
+    )
+    real_daily = real_daily[real_daily["crop_year"] >= "22/23"].copy()
+
+    df_normals["month"] = df_normals["date"].str[:2].astype(int)
+    df_normals["day"]   = df_normals["date"].str[3:].astype(int)
+    df_normals["xdate"] = df_normals.apply(
+        lambda r: pd.Timestamp(2000 if r["month"] >= 9 else 2001, r["month"], r["day"]),
+        axis=1,
+    )
+    normals_daily = (
+        df_normals.groupby(["region", "xdate"], as_index=False)
+        .agg(tavg_avg=("tavg", "mean"))
+        .sort_values("xdate")
+    )
+    return real_daily, normals_daily
+
+
+@st.cache_data(show_spinner=False)
+def process_brazil_rolling(real_daily: pd.DataFrame, normals_daily: pd.DataFrame):
+    """30-day rolling precipitation for Brazil crop year."""
+    def _roll(group):
+        group = group.sort_values("xdate").copy()
+        group["prcp_30d"] = group.rolling("30D", on="xdate", min_periods=1)["prcp_avg"].sum()
+        return group
+
+    real = (
+        real_daily.groupby(["region", "crop_year", "xdate"], as_index=False)
+        .agg(prcp_avg=("prcp_avg", "mean"))
+    )
+    real_rolled = real.groupby(["region", "crop_year"], group_keys=False).apply(_roll)
+
+    normals_rolled = normals_daily.copy()
+    normals_rolled = normals_rolled.groupby("region", group_keys=False).apply(_roll)
+
+    return real_rolled, normals_rolled
 
 
 # -------------------------------------------------------
@@ -529,6 +596,96 @@ def build_brazil_cumulative(real_daily, normals_daily, region,
     return fig
 
 
+def build_brazil_temperature(real_daily_temp, normals_daily_temp, region,
+                              crop_years_sorted, crop_year_colors,
+                              latest_crop_year, selected_crop_years):
+    df_r = real_daily_temp[real_daily_temp["region"] == region].copy()
+    df_n = normals_daily_temp[normals_daily_temp["region"] == region].sort_values("xdate")
+    fig  = go.Figure()
+
+    for cy in crop_years_sorted:
+        if cy not in selected_crop_years:
+            continue
+        color = crop_year_colors.get(cy, INK_4)
+        cy_df = df_r[df_r["crop_year"] == cy].sort_values("xdate")
+
+        if cy == latest_crop_year:
+            realized = cy_df[cy_df["tag"] == "realized"]
+            forecast = cy_df[cy_df["tag"] == "forecast"]
+            if not realized.empty:
+                fig.add_trace(go.Scatter(
+                    x=realized["xdate"], y=realized["tavg_avg"],
+                    mode="lines", name=cy, legendgroup=cy, showlegend=True,
+                    line=dict(color=color, width=2, dash="solid"), connectgaps=True,
+                    hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} °C<extra></extra>",
+                ))
+            if not forecast.empty:
+                if not realized.empty:
+                    forecast = pd.concat([realized.iloc[[-1]], forecast], ignore_index=True)
+                fig.add_trace(go.Scatter(
+                    x=forecast["xdate"], y=forecast["tavg_avg"],
+                    mode="lines", name=f"{cy} fcst", legendgroup=cy, showlegend=True,
+                    line=dict(color=color, width=2, dash="dot"), connectgaps=True,
+                    hovertemplate=f"<b>{cy} fcst</b>  %{{x|%b %d}}  %{{y:.1f}} °C<extra></extra>",
+                ))
+        else:
+            if not cy_df.empty:
+                fig.add_trace(go.Scatter(
+                    x=cy_df["xdate"], y=cy_df["tavg_avg"],
+                    mode="lines", name=cy,
+                    line=dict(color=color, width=2, dash="solid"), connectgaps=True,
+                    hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} °C<extra></extra>",
+                ))
+
+    if not df_n.empty:
+        fig.add_trace(go.Scatter(
+            x=df_n["xdate"], y=df_n["tavg_avg"],
+            mode="lines", name="Normals",
+            line=dict(color=INK_4, width=2.5, dash="dash"), connectgaps=True,
+            hovertemplate="<b>Normals</b>  %{x|%b %d}  %{y:.1f} °C<extra></extra>",
+        ))
+
+    layout = _base_layout(f"Average Temperature — Crop Year  ({region})", "°C")
+    layout["xaxis"] = _DT_XAXIS_BRAZIL.copy()
+    layout["legend"]["title"]["text"] = "Crop Year"
+    fig.update_layout(**layout)
+    return fig
+
+
+def build_brazil_rolling(real_rolled, normals_rolled, region,
+                          crop_years_sorted, crop_year_colors, selected_crop_years):
+    df_r = real_rolled[real_rolled["region"] == region].copy()
+    df_n = normals_rolled[normals_rolled["region"] == region].sort_values("xdate")
+    fig  = go.Figure()
+
+    for cy in crop_years_sorted:
+        if cy not in selected_crop_years:
+            continue
+        color = crop_year_colors.get(cy, INK_4)
+        cy_df = df_r[df_r["crop_year"] == cy].sort_values("xdate")
+        if not cy_df.empty:
+            fig.add_trace(go.Scatter(
+                x=cy_df["xdate"], y=cy_df["prcp_30d"],
+                mode="lines", name=cy,
+                line=dict(color=color, width=2), connectgaps=True,
+                hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>",
+            ))
+
+    if not df_n.empty:
+        fig.add_trace(go.Scatter(
+            x=df_n["xdate"], y=df_n["prcp_30d"],
+            mode="lines", name="Normals",
+            line=dict(color=INK_4, width=2.5, dash="dash"), connectgaps=True,
+            hovertemplate="<b>Normals</b>  %{x|%b %d}  %{y:.1f} mm<extra></extra>",
+        ))
+
+    layout = _base_layout(f"30-Day Rolling Precipitation — Crop Year  ({region})", "Rolling Sum (mm)")
+    layout["xaxis"] = _DT_XAXIS_BRAZIL.copy()
+    layout["legend"]["title"]["text"] = "Crop Year"
+    fig.update_layout(**layout)
+    return fig
+
+
 # -------------------------------------------------------
 # HELPER: render a full calendar-year origin tab
 # -------------------------------------------------------
@@ -592,7 +749,7 @@ st.markdown(
     f"color:{NAVY};letter-spacing:-.02em;margin-bottom:.15rem'>"
     f"Coffee Weather Dashboard</h1>"
     f"<p style='color:{INK_4};font-size:.78rem;margin-top:0'>"
-    f"WeatherDesk XWeather API &nbsp;·&nbsp; Cache refreshes every hour</p>",
+    f"WeatherDesk XWeather API &nbsp;·&nbsp; Cache refreshes daily</p>",
     unsafe_allow_html=True,
 )
 
@@ -647,37 +804,86 @@ tab_brazil, tab_colombia, tab_honduras, tab_super4, tab_vietnam = st.tabs([
 
 # ---- BRAZIL ----
 with tab_brazil:
-    with st.spinner("Fetching Brazil precipitation..."):
-        raw_brazil = load_origin_data("Brazil", "PRCP")
+    c1, c2 = st.columns(2)
+    with c1:
+        with st.spinner("Fetching Brazil precipitation..."):
+            raw_brazil_prcp = load_origin_data("Brazil", "PRCP")
+    with c2:
+        with st.spinner("Fetching Brazil temperature..."):
+            raw_brazil_temp = load_origin_data("Brazil", "TAVG")
 
-    if raw_brazil.empty:
+    if raw_brazil_prcp.empty:
         st.error("No data for Brazil.")
     else:
         real_daily, normals_daily, crop_years_sorted, crop_year_colors, latest_cy = \
-            process_brazil(raw_brazil, today)
+            process_brazil(raw_brazil_prcp, today)
 
-        # Crop year filter inside tab
-        selected_crop_years = st.multiselect(
-            "Crop Years",
-            options=crop_years_sorted,
-            default=crop_years_sorted,
-            key="brazil_cy_filter",
-        )
+        real_daily_temp, normals_daily_temp = \
+            process_brazil_temp(raw_brazil_temp, today) if not raw_brazil_temp.empty else (pd.DataFrame(), pd.DataFrame())
 
-        regions_brazil = sorted(real_daily["region"].unique())
-        for region in regions_brazil:
-            st.markdown(
-                f"<h2 class='section-header'>Cumulative Precipitation — Crop Year &nbsp;—&nbsp; {region}</h2>",
-                unsafe_allow_html=True,
+        real_rolled, normals_rolled = process_brazil_rolling(real_daily, normals_daily)
+
+        # Filters row
+        filter_col1, filter_col2 = st.columns(2)
+        with filter_col1:
+            regions_all = sorted(real_daily["region"].unique())
+            selected_regions_brazil = st.multiselect(
+                "Sub-Regions",
+                options=regions_all,
+                default=regions_all,
+                key="brazil_region_filter",
             )
-            st.plotly_chart(
-                build_brazil_cumulative(
-                    real_daily, normals_daily, region,
-                    crop_years_sorted, crop_year_colors, latest_cy,
-                    selected_crop_years,
-                ),
-                use_container_width=True, key=f"bra_cum_{region}",
+        with filter_col2:
+            selected_crop_years = st.multiselect(
+                "Crop Years",
+                options=crop_years_sorted,
+                default=crop_years_sorted,
+                key="brazil_cy_filter",
             )
+
+        if not selected_regions_brazil:
+            st.warning("Select at least one sub-region.")
+        else:
+            for region in selected_regions_brazil:
+                st.markdown(
+                    f"<h2 class='section-header'>Cumulative Precipitation &nbsp;—&nbsp; {region}</h2>",
+                    unsafe_allow_html=True,
+                )
+                st.plotly_chart(
+                    build_brazil_cumulative(
+                        real_daily, normals_daily, region,
+                        crop_years_sorted, crop_year_colors, latest_cy,
+                        selected_crop_years,
+                    ),
+                    use_container_width=True, key=f"bra_cum_{region}",
+                )
+
+                if not real_daily_temp.empty:
+                    st.markdown(
+                        f"<h2 class='section-header'>Average Temperature &nbsp;—&nbsp; {region}</h2>",
+                        unsafe_allow_html=True,
+                    )
+                    st.plotly_chart(
+                        build_brazil_temperature(
+                            real_daily_temp, normals_daily_temp, region,
+                            crop_years_sorted, crop_year_colors, latest_cy,
+                            selected_crop_years,
+                        ),
+                        use_container_width=True, key=f"bra_tmp_{region}",
+                    )
+
+                st.markdown(
+                    f"<h2 class='section-header'>30-Day Rolling Precipitation &nbsp;—&nbsp; {region}</h2>",
+                    unsafe_allow_html=True,
+                )
+                st.plotly_chart(
+                    build_brazil_rolling(
+                        real_rolled, normals_rolled, region,
+                        crop_years_sorted, crop_year_colors,
+                        selected_crop_years,
+                    ),
+                    use_container_width=True, key=f"bra_rol_{region}",
+                )
 
 # ---- COLOMBIA ----
 with tab_colombia:
