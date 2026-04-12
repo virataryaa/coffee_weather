@@ -243,7 +243,7 @@ def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
         group["prcp_avg_30d_sum"] = group.rolling("30D", on="rolling_date", min_periods=1)["prcp_avg"].sum()
         return group
 
-    agg_normals = agg_normals.groupby("region", group_keys=False).apply(_roll)
+    agg_normals = agg_normals.groupby("region", group_keys=False).apply(_roll).reset_index(drop=True)
     agg_normals["xdate"] = agg_normals["rolling_date"].apply(
         lambda d: pd.Timestamp(year=2026, month=d.month, day=d.day)
     )
@@ -253,7 +253,7 @@ def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
     agg_other = other_df.groupby(["region", "year", "rolling_date"], as_index=False).agg(
         prcp_avg=("prcp_avg", "mean"), prcp_sum_avg=("prcp_sum_avg", "mean")
     )
-    agg_other = agg_other.groupby("region", group_keys=False).apply(_roll)
+    agg_other = agg_other.groupby("region", group_keys=False).apply(_roll).reset_index(drop=True)
     agg_other["xdate"] = agg_other["rolling_date"].apply(
         lambda d: pd.Timestamp(year=2026, month=d.month, day=d.day)
     )
@@ -395,10 +395,10 @@ def process_brazil_rolling(real_daily: pd.DataFrame, normals_daily: pd.DataFrame
         real_daily.groupby(["region", "crop_year", "xdate"], as_index=False)
         .agg(prcp_avg=("prcp_avg", "mean"))
     )
-    real_rolled = real.groupby(["region", "crop_year"], group_keys=False).apply(_roll)
+    real_rolled = real.groupby(["region", "crop_year"], group_keys=False).apply(_roll).reset_index(drop=True)
 
     normals_rolled = normals_daily.copy()
-    normals_rolled = normals_rolled.groupby("region", group_keys=False).apply(_roll)
+    normals_rolled = normals_rolled.groupby("region", group_keys=False).apply(_roll).reset_index(drop=True)
 
     return real_rolled, normals_rolled
 
@@ -773,6 +773,8 @@ with st.sidebar:
 
     if st.button("Refresh Data", use_container_width=True):
         st.cache_data.clear()
+        for _k in ["brazil_loaded", "colombia_loaded", "honduras_loaded", "super4_loaded", "vietnam_loaded"]:
+            st.session_state.pop(_k, None)
         st.rerun()
 
     st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:.8rem 0'>",
@@ -804,102 +806,132 @@ tab_brazil, tab_colombia, tab_honduras, tab_super4, tab_vietnam = st.tabs([
 
 # ---- BRAZIL ----
 with tab_brazil:
-    c1, c2 = st.columns(2)
-    with c1:
-        with st.spinner("Fetching Brazil precipitation..."):
-            raw_brazil_prcp = load_origin_data("Brazil", "PRCP")
-    with c2:
-        with st.spinner("Fetching Brazil temperature..."):
-            raw_brazil_temp = load_origin_data("Brazil", "TAVG")
-
-    if raw_brazil_prcp.empty:
-        st.error("No data for Brazil.")
+    if not st.session_state.get("brazil_loaded", False):
+        st.info("Click below to load Brazil weather data.")
+        if st.button("Load Brazil Data", key="load_brazil"):
+            st.session_state.brazil_loaded = True
+            st.rerun()
     else:
-        real_daily, normals_daily, crop_years_sorted, crop_year_colors, latest_cy = \
-            process_brazil(raw_brazil_prcp, today)
+        c1, c2 = st.columns(2)
+        with c1:
+            with st.spinner("Fetching Brazil precipitation..."):
+                raw_brazil_prcp = load_origin_data("Brazil", "PRCP")
+        with c2:
+            with st.spinner("Fetching Brazil temperature..."):
+                raw_brazil_temp = load_origin_data("Brazil", "TAVG")
 
-        real_daily_temp, normals_daily_temp = \
-            process_brazil_temp(raw_brazil_temp, today) if not raw_brazil_temp.empty else (pd.DataFrame(), pd.DataFrame())
-
-        real_rolled, normals_rolled = process_brazil_rolling(real_daily, normals_daily)
-
-        # Filters row
-        filter_col1, filter_col2 = st.columns(2)
-        with filter_col1:
-            regions_all = sorted(real_daily["region"].unique())
-            selected_regions_brazil = st.multiselect(
-                "Sub-Regions",
-                options=regions_all,
-                default=regions_all,
-                key="brazil_region_filter",
-            )
-        with filter_col2:
-            selected_crop_years = st.multiselect(
-                "Crop Years",
-                options=crop_years_sorted,
-                default=crop_years_sorted,
-                key="brazil_cy_filter",
-            )
-
-        if not selected_regions_brazil:
-            st.warning("Select at least one sub-region.")
+        if raw_brazil_prcp.empty:
+            st.error("No data for Brazil.")
         else:
-            for region in selected_regions_brazil:
-                st.markdown(
-                    f"<h2 class='section-header'>Cumulative Precipitation &nbsp;—&nbsp; {region}</h2>",
-                    unsafe_allow_html=True,
+            real_daily, normals_daily, crop_years_sorted, crop_year_colors, latest_cy = \
+                process_brazil(raw_brazil_prcp, today)
+
+            real_daily_temp, normals_daily_temp = \
+                process_brazil_temp(raw_brazil_temp, today) if not raw_brazil_temp.empty else (pd.DataFrame(), pd.DataFrame())
+
+            real_rolled, normals_rolled = process_brazil_rolling(real_daily, normals_daily)
+
+            # Filters row
+            filter_col1, filter_col2 = st.columns(2)
+            with filter_col1:
+                regions_all = sorted(real_daily["region"].unique())
+                selected_regions_brazil = st.multiselect(
+                    "Sub-Regions",
+                    options=regions_all,
+                    default=regions_all,
+                    key="brazil_region_filter",
                 )
-                st.plotly_chart(
-                    build_brazil_cumulative(
-                        real_daily, normals_daily, region,
-                        crop_years_sorted, crop_year_colors, latest_cy,
-                        selected_crop_years,
-                    ),
-                    use_container_width=True, key=f"bra_cum_{region}",
+            with filter_col2:
+                selected_crop_years = st.multiselect(
+                    "Crop Years",
+                    options=crop_years_sorted,
+                    default=crop_years_sorted,
+                    key="brazil_cy_filter",
                 )
 
-                if not real_daily_temp.empty:
+            if not selected_regions_brazil:
+                st.warning("Select at least one sub-region.")
+            else:
+                for region in selected_regions_brazil:
                     st.markdown(
-                        f"<h2 class='section-header'>Average Temperature &nbsp;—&nbsp; {region}</h2>",
+                        f"<h2 class='section-header'>Cumulative Precipitation &nbsp;—&nbsp; {region}</h2>",
                         unsafe_allow_html=True,
                     )
                     st.plotly_chart(
-                        build_brazil_temperature(
-                            real_daily_temp, normals_daily_temp, region,
+                        build_brazil_cumulative(
+                            real_daily, normals_daily, region,
                             crop_years_sorted, crop_year_colors, latest_cy,
                             selected_crop_years,
                         ),
-                        use_container_width=True, key=f"bra_tmp_{region}",
+                        use_container_width=True, key=f"bra_cum_{region}",
                     )
 
-                st.markdown(
-                    f"<h2 class='section-header'>30-Day Rolling Precipitation &nbsp;—&nbsp; {region}</h2>",
-                    unsafe_allow_html=True,
-                )
-                st.plotly_chart(
-                    build_brazil_rolling(
-                        real_rolled, normals_rolled, region,
-                        crop_years_sorted, crop_year_colors,
-                        selected_crop_years,
-                    ),
-                    use_container_width=True, key=f"bra_rol_{region}",
-                )
+                    if not real_daily_temp.empty:
+                        st.markdown(
+                            f"<h2 class='section-header'>Average Temperature &nbsp;—&nbsp; {region}</h2>",
+                            unsafe_allow_html=True,
+                        )
+                        st.plotly_chart(
+                            build_brazil_temperature(
+                                real_daily_temp, normals_daily_temp, region,
+                                crop_years_sorted, crop_year_colors, latest_cy,
+                                selected_crop_years,
+                            ),
+                            use_container_width=True, key=f"bra_tmp_{region}",
+                        )
+
+                    st.markdown(
+                        f"<h2 class='section-header'>30-Day Rolling Precipitation &nbsp;—&nbsp; {region}</h2>",
+                        unsafe_allow_html=True,
+                    )
+                    st.plotly_chart(
+                        build_brazil_rolling(
+                            real_rolled, normals_rolled, region,
+                            crop_years_sorted, crop_year_colors,
+                            selected_crop_years,
+                        ),
+                        use_container_width=True, key=f"bra_rol_{region}",
+                    )
 
 # ---- COLOMBIA ----
 with tab_colombia:
-    render_calendar_tab("Colombia", selected_years, today)
+    if not st.session_state.get("colombia_loaded", False):
+        st.info("Click below to load Colombia weather data.")
+        if st.button("Load Colombia Data", key="load_colombia"):
+            st.session_state.colombia_loaded = True
+            st.rerun()
+    else:
+        render_calendar_tab("Colombia", selected_years, today)
 
 # ---- HONDURAS ----
 with tab_honduras:
-    render_calendar_tab("Honduras", selected_years, today)
+    if not st.session_state.get("honduras_loaded", False):
+        st.info("Click below to load Honduras weather data.")
+        if st.button("Load Honduras Data", key="load_honduras"):
+            st.session_state.honduras_loaded = True
+            st.rerun()
+    else:
+        render_calendar_tab("Honduras", selected_years, today)
 
 # ---- SUPER 4 ----
 with tab_super4:
-    render_calendar_tab("Super 4", selected_years, today)
+    if not st.session_state.get("super4_loaded", False):
+        st.info("Click below to load Super 4 weather data.")
+        if st.button("Load Super 4 Data", key="load_super4"):
+            st.session_state.super4_loaded = True
+            st.rerun()
+    else:
+        render_calendar_tab("Super 4", selected_years, today)
 
 # ---- VIETNAM ----
 with tab_vietnam:
-    render_calendar_tab("Vietnam", selected_years, today)
+    if not st.session_state.get("vietnam_loaded", False):
+        st.info("Click below to load Vietnam weather data.")
+        if st.button("Load Vietnam Data", key="load_vietnam"):
+            st.session_state.vietnam_loaded = True
+            st.rerun()
+    else:
+        render_calendar_tab("Vietnam", selected_years, today)
 
 st.markdown(
     f"<p style='font-size:.72rem;color:{INK_4};margin-top:1.5rem;"
