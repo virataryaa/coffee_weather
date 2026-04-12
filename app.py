@@ -238,12 +238,12 @@ def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
         prcp_avg=("prcp_avg", "mean"), prcp_sum_avg=("prcp_sum_avg", "mean")
     )
 
-    def _roll(group):
-        group = group.sort_values("rolling_date").copy()
-        group["prcp_avg_30d_sum"] = group.rolling("30D", on="rolling_date", min_periods=1)["prcp_avg"].sum()
-        return group
-
-    agg_normals = agg_normals.groupby("region", group_keys=False).apply(_roll).reset_index(drop=True)
+    n_parts = []
+    for _, grp in agg_normals.groupby("region"):
+        grp = grp.sort_values("rolling_date").copy()
+        grp["prcp_avg_30d_sum"] = grp.rolling("30D", on="rolling_date", min_periods=1)["prcp_avg"].sum()
+        n_parts.append(grp)
+    agg_normals = pd.concat(n_parts, ignore_index=True) if n_parts else agg_normals.assign(prcp_avg_30d_sum=pd.NA)
     agg_normals["xdate"] = agg_normals["rolling_date"].apply(
         lambda d: pd.Timestamp(year=2026, month=d.month, day=d.day)
     )
@@ -253,7 +253,12 @@ def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
     agg_other = other_df.groupby(["region", "year", "rolling_date"], as_index=False).agg(
         prcp_avg=("prcp_avg", "mean"), prcp_sum_avg=("prcp_sum_avg", "mean")
     )
-    agg_other = agg_other.groupby("region", group_keys=False).apply(_roll).reset_index(drop=True)
+    o_parts = []
+    for _, grp in agg_other.groupby("region"):
+        grp = grp.sort_values("rolling_date").copy()
+        grp["prcp_avg_30d_sum"] = grp.rolling("30D", on="rolling_date", min_periods=1)["prcp_avg"].sum()
+        o_parts.append(grp)
+    agg_other = pd.concat(o_parts, ignore_index=True) if o_parts else agg_other.assign(prcp_avg_30d_sum=pd.NA)
     agg_other["xdate"] = agg_other["rolling_date"].apply(
         lambda d: pd.Timestamp(year=2026, month=d.month, day=d.day)
     )
@@ -386,19 +391,23 @@ def process_brazil_temp(raw_temp: pd.DataFrame, today: pd.Timestamp):
 @st.cache_data(show_spinner=False)
 def process_brazil_rolling(real_daily: pd.DataFrame, normals_daily: pd.DataFrame):
     """30-day rolling precipitation for Brazil crop year."""
-    def _roll(group):
-        group = group.sort_values("xdate").copy()
-        group["prcp_30d"] = group.rolling("30D", on="xdate", min_periods=1)["prcp_avg"].sum()
-        return group
-
     real = (
         real_daily.groupby(["region", "crop_year", "xdate"], as_index=False)
         .agg(prcp_avg=("prcp_avg", "mean"))
     )
-    real_rolled = real.groupby(["region", "crop_year"], group_keys=False).apply(_roll).reset_index(drop=True)
+    parts = []
+    for _, grp in real.groupby(["region", "crop_year"]):
+        grp = grp.sort_values("xdate").copy()
+        grp["prcp_30d"] = grp.rolling("30D", on="xdate", min_periods=1)["prcp_avg"].sum()
+        parts.append(grp)
+    real_rolled = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=list(real.columns) + ["prcp_30d"])
 
-    normals_rolled = normals_daily.copy()
-    normals_rolled = normals_rolled.groupby("region", group_keys=False).apply(_roll).reset_index(drop=True)
+    nparts = []
+    for _, grp in normals_daily.groupby("region"):
+        grp = grp.sort_values("xdate").copy()
+        grp["prcp_30d"] = grp.rolling("30D", on="xdate", min_periods=1)["prcp_avg"].sum()
+        nparts.append(grp)
+    normals_rolled = pd.concat(nparts, ignore_index=True) if nparts else pd.DataFrame(columns=list(normals_daily.columns) + ["prcp_30d"])
 
     return real_rolled, normals_rolled
 
